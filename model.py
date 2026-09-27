@@ -39,6 +39,16 @@ def load():
 
 def save(s):
     s['updated_at']=datetime.now().isoformat(timespec='seconds')
+    conn=_pg()
+    if conn:
+        try:
+            with conn.cursor() as c:
+                c.execute('CREATE TABLE IF NOT EXISTS model_state (id INTEGER PRIMARY KEY, state_json TEXT NOT NULL)')
+                c.execute('INSERT INTO model_state(id,state_json) VALUES(1,%s) ON CONFLICT(id) DO UPDATE SET state_json=EXCLUDED.state_json',(json.dumps(s,ensure_ascii=False),))
+                conn.commit(); conn.close(); return
+        except Exception:
+            try: conn.close()
+            except Exception: pass
     with open(PATH,'w',encoding='utf-8') as f: json.dump(s,f,ensure_ascii=False,indent=2)
 
 def normalize_weights(w):
@@ -46,12 +56,13 @@ def normalize_weights(w):
     total=sum(w.values()) or 1
     return {k:round(v/total,4) for k,v in w.items()}
 
-def learn_from_record(state, predicted, actual):
-    hit = int(predicted and predicted[0]==actual)
+def learn_from_record(state, predicted, actual, feature_scores=None):
+    hit=int(predicted and predicted[0]==actual)
     state['samples']+=1; state['hits']+=hit
-    delta=.012 if hit else -.006
-    for k in ['nation','local','motor','st','exhibition','exhibition_st','history']:
-        state['weights'][k]+=delta
+    delta=.0015 if hit else -.00075
+    factors={'nation':1.0,'local':.8,'motor':.9,'st':1.1,'exhibition':.7,'exhibition_st':.6,'history':.5}
+    for k,factor in factors.items():
+        state['weights'][k]+=delta*factor
     state['weights']=normalize_weights(state['weights'])
     save(state); return state,hit
 
