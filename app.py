@@ -351,7 +351,12 @@ import os
 
 STORE=Path('prediction_store.sqlite3')
 STORE_LOCK=threading.Lock()
-USE_POSTGRES=bool(os.getenv('DATABASE_URL','').strip())
+DATABASE_URL=os.getenv('DATABASE_URL','').strip()
+# Render's managed Postgres URL must contain credentials and a resolvable host.
+# The temporary manual value used during setup (e.g. postgres://user@boat-ai-db/...)
+# is not a usable connection string; fall back to SQLite until Blueprint-managed
+# fromDatabase wiring supplies the real private connection URL.
+USE_POSTGRES=bool(DATABASE_URL and '@' in DATABASE_URL and '://' in DATABASE_URL)
 
 class PGCompat:
     def __init__(self,url):
@@ -364,9 +369,36 @@ class PGCompat:
     def commit(self): self.conn.commit()
     def close(self): self.conn.close()
 
+def sqlite_db():
+    conn=sqlite3.connect(str(STORE),timeout=30)
+    conn.row_factory=sqlite3.Row
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('''CREATE TABLE IF NOT EXISTS predictions(
+        race_id TEXT PRIMARY KEY, date TEXT NOT NULL, venue_code TEXT NOT NULL, venue TEXT,
+        race INTEGER NOT NULL, generated_at TEXT NOT NULL, model_version TEXT,
+        main INTEGER, second INTEGER, hole INTEGER, scenario TEXT,
+        boats_json TEXT NOT NULL, bets_json TEXT NOT NULL,
+        weather_json TEXT, source_json TEXT, created_at TEXT NOT NULL)''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS results(
+        race_id TEXT PRIMARY KEY, date TEXT NOT NULL, venue_code TEXT NOT NULL, venue TEXT,
+        race INTEGER NOT NULL, actual_combo TEXT NOT NULL, payout INTEGER,
+        fetched_at TEXT NOT NULL, source TEXT NOT NULL)''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS evaluations(
+        race_id TEXT PRIMARY KEY, predicted_combo TEXT, actual_combo TEXT,
+        exact_hit INTEGER NOT NULL, first_hit INTEGER NOT NULL,
+        actual_probability REAL, logloss REAL, brier REAL,
+        evaluated_at TEXT NOT NULL, learned INTEGER NOT NULL DEFAULT 0)''')
+    conn.commit()
+    return conn
+
 def db():
     if USE_POSTGRES:
-        return PGCompat(os.environ['DATABASE_URL'])
+        try:
+            return PGCompat(DATABASE_URL)
+        except Exception:
+            # Keep the API available if the DB reference is temporarily invalid.
+            # Once Render injects the managed internal URL, PostgreSQL is used.
+            return sqlite_db()
     conn=sqlite3.connect(str(STORE),timeout=30)
     conn.row_factory=sqlite3.Row
     conn.execute('PRAGMA journal_mode=WAL')
@@ -698,63 +730,3 @@ def model_validation(rows, weights):
             'exact_hit_rate':sum(x[4] for x in vals)/len(vals)*100}
 
 def auto_promote_model(date=None, min_samples=100):
-    conn=db()
-    q='''SELECT p.boats_json,p.date,p.race_id,e.actual_combo,e.evaluated_at
-         FROM predictions p JOIN evaluations e ON p.race_id=e.race_id'''
-    args=[]
-    if date:
-        q+=' WHERE p.date<=?'
-        args.append(str(date).replace('/',''))
-    q+=' ORDER BY p.date,p.venue_code,p.race'
-    rows=conn.execute(q,args).fetchall()
-    conn.close()
-    if len(rows)<min_samples:
-        return {'promoted':False,'reason':'insufficient_validation_data','samples':len(rows)}
-    split=max(50,int(len(rows)*0.7))
-    train=list(rows[:split]); valid=list(rows[split:])
-    state=load_model(); base=state['weights']
-    baseline=model_validation(valid,base)
-    candidates=[('baseline',base)]
-    for feature in base:
-        for delta in (-0.03,-0.015,0.015,0.03):
-            candidates.append((feature+('+' if delta>0 else '')+str(delta),candidate_weights(state,feature,delta)))
-    # Choose the candidate that improves training logloss, then require validation improvement.
-    scored=[]
-    for name,w in candidates:
-        tr=model_validation(train,w)
-        scored.append((tr['avg_logloss'],name,w,tr))
-    scored.sort(key=lambda x:x[0])
-    best_train=scored[0]
-    candidate_valid=model_validation(valid,best_train[2])
-    improvement=(baseline['avg_logloss']-candidate_valid['avg_logloss'])/max(baseline['avg_logloss'],1e-9)
-    if best_train[1]!='baseline' and improvement>=0.005:
-        new_state=promote(state,best_train[2],reason='champion_validation_improved')
-        return {'promoted':True,'generation':new_state.get('generation'),'candidate':best_train[1],
-                'baseline_validation':baseline,'candidate_validation':candidate_valid,
-                'validation_improvement_pct':round(improvement*100,3),'train_samples':len(train),'validation_samples':len(valid)}
-    return {'promoted':False,'reason':'validation_not_improved','candidate':best_train[1],
-            'baseline_validation':baseline,'candidate_validation':candidate_valid,
-            'validation_improvement_pct':round(improvement*100,3),'train_samples':len(train),'validation_samples':len(valid)}
-
-@app.post('/api/model/auto-promote')
-def api_model_auto_promote():
-    date=request.args.get('date')
-    return jsonify({'ok':True,**auto_promote_model(date=date)})
-
-
-
-@app.post('/api/daily-close')
-def api_daily_close():
-    date=request.args.get('date',datetime.now().strftime('%Y%m%d')).replace('/','')
-    r=api_results_fetch().get_json()
-    e=api_evaluate_day().get_json()
-    promotion=auto_promote_model(date=date)
-    return jsonify({'ok':bool(r.get('ok') and e.get('ok')),'date':date,
-                    'results_saved':r.get('results_saved',0),'evaluated_races':e.get('evaluated_races',0),
-                    'exact_hit_rate':e.get('exact_hit_rate'),'first_hit_rate':e.get('first_hit_rate'),
-                    'learned_records':e.get('learned_records',0),'result_errors':r.get('errors',[]),
-                    'model_promotion':promotion,
-                    'note':'日次クローズ：結果取得→予想照合→評価→オンライン学習→時系列検証によるモデル昇格判定の順で処理しました。'})
-
-
-if __name__=='__main__':app.run(host='0.0.0.0',port=8000)
