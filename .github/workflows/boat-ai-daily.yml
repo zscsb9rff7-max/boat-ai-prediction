@@ -2,16 +2,24 @@ name: Boat AI Daily Loop
 on:
   schedule:
     - cron: '0 15 * * *'
+    - cron: '30 15 * * *'
   workflow_dispatch:
 jobs:
-  daily-run:
+  daily-loop:
     runs-on: ubuntu-latest
     steps:
-      - name: Run daily prediction evaluation and learning
+      - name: Run daily prediction or previous-day close
         env:
           BOAT_AI_API: https://boat-ai-api-v3.onrender.com
         run: |
-          DATE=$(TZ=Asia/Tokyo date +%Y%m%d)
-          echo "Running Boat AI daily loop for $DATE"
-          curl --fail-with-body --show-error --silent             --max-time 900             -X POST "$BOAT_AI_API/api/daily-run?date=$DATE&limit=288&history_days=3&learn=1"
+          NOW=$(TZ=Asia/Tokyo date +%H)
+          TODAY=$(TZ=Asia/Tokyo date +%Y%m%d)
+          YESTERDAY=$(TZ=Asia/Tokyo date -d 'yesterday' +%Y%m%d)
+          if [ "$NOW" = "00" ]; then
+            echo "Running predictions for $TODAY"
+            curl --fail-with-body --show-error --silent               --max-time 900               -X POST "$BOAT_AI_API/api/daily-predict-save?date=$TODAY&limit=288&history_days=3"
+          else
+            echo "Closing and learning from $YESTERDAY"
+            curl --fail-with-body --show-error --silent               --max-time 900               -X POST "$BOAT_AI_API/api/daily-close?date=$YESTERDAY&learn=1"
+          fi
           echo
