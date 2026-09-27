@@ -221,6 +221,50 @@ def api_history():
     jcd=request.args.get('stadium','15'); days=int(request.args.get('days','30'))
     return jsonify({'ok':True,'venue':STADIUMS.get(jcd,jcd),'stats':historical_stats(jcd,days)})
 
+@app.get('/api/daily')
+def api_daily():
+    """Return only venues that actually have a program on the requested date.
+    One lightweight racelist request per venue; no historical backtest fan-out.
+    """
+    date=request.args.get('date',datetime.now().strftime('%Y%m%d')).replace('/','')
+    active=[]
+    checked=0
+    errors=[]
+    for jcd,name in STADIUMS.items():
+        checked+=1
+        url=f'{BASE}racelist?hd={date}&jcd={jcd}&rno=1'
+        try:
+            html=get(url)
+            soup=BeautifulSoup(html,'html.parser')
+            text=soup.get_text(' ',strip=True)
+            # A non-race/closed venue normally does not expose the 12-race navigation.
+            race_links=[a.get_text(' ',strip=True) for a in soup.find_all('a')]
+            has_race_nav=any(re.fullmatch(r'(?:1[0-2]|[1-9])R',x) for x in race_links)
+            has_entries=len(boats_from(html))>=6
+            if has_race_nav or has_entries:
+                active.append({
+                    'venue_code':jcd,
+                    'venue':name,
+                    'races':12,
+                    'race_urls':[f'{BASE}racelist?hd={date}&jcd={jcd}&rno={r}' for r in range(1,13)]
+                })
+        except Exception as e:
+            errors.append({'venue_code':jcd,'venue':name,'error':str(e)})
+    return jsonify({
+        'ok':True,
+        'date':date,
+        'checked_venues':checked,
+        'active_venues':len(active),
+        'target_races':sum(x['races'] for x in active),
+        'venues':active,
+        'errors':errors,
+        'note':'開催判定は公式出走表を場ごとに1回確認し、非開催場を予想対象から除外します。各レースの詳細取得は必要なRだけ実行します。'
+    })
+
+@app.get('/api/today')
+def api_today():
+    return api_daily()
+
 @app.get('/api/analyze')
 def api_analyze():
     date=request.args.get('date',datetime.now().strftime('%Y%m%d')).replace('/',''); jcd=request.args.get('stadium','15'); race=int(request.args.get('race','9')); fixed=request.args.get('fixed','none'); days=int(request.args.get('history_days','30'))
