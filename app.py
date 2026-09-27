@@ -628,16 +628,96 @@ def api_analytics():
                     'note':'保存済み予測と確定結果の評価データから条件別に集計しています。件数が少ない区分は参考値として扱ってください。'})
 
 
+def score_prediction_with_weights(row, weights):
+    try: boats=json.loads(row['boats_json'])
+    except Exception: boats=[]
+    scored=[]
+    for b in boats:
+        s=(float(b.get('nations',50) or 50)*weights['nation']+
+           float(b.get('locals',50) or 50)*weights['local']+
+           float(b.get('motors',50) or 50)*weights['motor']+
+           float(b.get('sts',50) or 50)*weights['st']+
+           float(b.get('exhibitions',50) or 50)*weights['exhibition']+
+           float(b.get('exhibition_sts',50) or 50)*weights['exhibition_st']+
+           float(b.get('history_adjustment',0) or 0))
+        scored.append((int(b.get('boat',0)),max(s,0.1)))
+    score=dict(scored)
+    combos=[]
+    for a,b,c in permutations(range(1,7),3):
+        raw=score.get(a,0.1)*score.get(b,0.1)*score.get(c,0.1)
+        combos.append((f'{a}{b}{c}',raw))
+    total=sum(x[1] for x in combos) or 1
+    actual=str(row['actual_combo']).replace('-','')
+    actual_p=next((raw/total for combo,raw in combos if combo==actual),1e-9)
+    top=max(combos,key=lambda x:x[1])[0]
+    return top,actual_p,-math.log(max(actual_p,1e-9)),int(top[:1]==actual[:1]),int(top==actual)
+
+def model_validation(rows, weights):
+    vals=[score_prediction_with_weights(r,weights) for r in rows]
+    if not vals:return {'races':0}
+    return {'races':len(vals),
+            'avg_logloss':sum(x[2] for x in vals)/len(vals),
+            'first_hit_rate':sum(x[3] for x in vals)/len(vals)*100,
+            'exact_hit_rate':sum(x[4] for x in vals)/len(vals)*100}
+
+def auto_promote_model(date=None, min_samples=100):
+    conn=db()
+    q='''SELECT p.boats_json,p.date,p.race_id,e.actual_combo,e.evaluated_at
+         FROM predictions p JOIN evaluations e ON p.race_id=e.race_id'''
+    args=[]
+    if date:
+        q+=' WHERE p.date<=?'
+        args.append(str(date).replace('/',''))
+    q+=' ORDER BY p.date,p.venue_code,p.race'
+    rows=conn.execute(q,args).fetchall()
+    conn.close()
+    if len(rows)<min_samples:
+        return {'promoted':False,'reason':'insufficient_validation_data','samples':len(rows)}
+    split=max(50,int(len(rows)*0.7))
+    train=list(rows[:split]); valid=list(rows[split:])
+    state=load_model(); base=state['weights']
+    baseline=model_validation(valid,base)
+    candidates=[('baseline',base)]
+    for feature in base:
+        for delta in (-0.03,-0.015,0.015,0.03):
+            candidates.append((feature+('+' if delta>0 else '')+str(delta),candidate_weights(state,feature,delta)))
+    # Choose the candidate that improves training logloss, then require validation improvement.
+    scored=[]
+    for name,w in candidates:
+        tr=model_validation(train,w)
+        scored.append((tr['avg_logloss'],name,w,tr))
+    scored.sort(key=lambda x:x[0])
+    best_train=scored[0]
+    candidate_valid=model_validation(valid,best_train[2])
+    improvement=(baseline['avg_logloss']-candidate_valid['avg_logloss'])/max(baseline['avg_logloss'],1e-9)
+    if best_train[1]!='baseline' and improvement>=0.005:
+        new_state=promote(state,best_train[2],reason='champion_validation_improved')
+        return {'promoted':True,'generation':new_state.get('generation'),'candidate':best_train[1],
+                'baseline_validation':baseline,'candidate_validation':candidate_valid,
+                'validation_improvement_pct':round(improvement*100,3),'train_samples':len(train),'validation_samples':len(valid)}
+    return {'promoted':False,'reason':'validation_not_improved','candidate':best_train[1],
+            'baseline_validation':baseline,'candidate_validation':candidate_valid,
+            'validation_improvement_pct':round(improvement*100,3),'train_samples':len(train),'validation_samples':len(valid)}
+
+@app.post('/api/model/auto-promote')
+def api_model_auto_promote():
+    date=request.args.get('date')
+    return jsonify({'ok':True,**auto_promote_model(date=date)})
+
+
+
 @app.post('/api/daily-close')
 def api_daily_close():
     date=request.args.get('date',datetime.now().strftime('%Y%m%d')).replace('/','')
     r=api_results_fetch().get_json()
     e=api_evaluate_day().get_json()
+    promotion=auto_promote_model(date=date)
     return jsonify({'ok':bool(r.get('ok') and e.get('ok')),'date':date,
                     'results_saved':r.get('results_saved',0),'evaluated_races':e.get('evaluated_races',0),
                     'exact_hit_rate':e.get('exact_hit_rate'),'first_hit_rate':e.get('first_hit_rate'),
                     'learned_records':e.get('learned_records',0),'result_errors':r.get('errors',[]),
-                    'note':'日次クローズ：結果取得→予想照合→評価→オンライン学習の順で処理しました。'})
+                    'model_promotion':promotion,
+                    'note':'日次クローズ：結果取得→予想照合→評価→オンライン学習→時系列検証によるモデル昇格判定の順で処理しました。'})
 
 
 if __name__=='__main__':app.run(host='0.0.0.0',port=8000)
