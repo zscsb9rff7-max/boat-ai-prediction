@@ -353,7 +353,6 @@ STORE=Path('prediction_store.sqlite3')
 STORE_LOCK=threading.Lock()
 DATABASE_URL=os.getenv('DATABASE_URL','').strip()
 # Use PostgreSQL only when Render has injected a real connection URL.
-# The temporary manual value used during setup is not a resolvable DB URL.
 USE_POSTGRES=bool(DATABASE_URL and '@' in DATABASE_URL and '://' in DATABASE_URL and 'boat-ai-db' not in DATABASE_URL.split('@',1)[-1].split('/',1)[0])
 
 class PGCompat:
@@ -372,9 +371,7 @@ def db():
         try:
             return PGCompat(DATABASE_URL)
         except Exception:
-            # Keep the API available until Blueprint-managed DB wiring is active.
-            USE_POSTGRES=False
-    conn=sqlite3.connect(str(STORE),timeout=30)
+            return sqlite3.connect(str(STORE),timeout=30)
     conn=sqlite3.connect(str(STORE),timeout=30)
     conn.row_factory=sqlite3.Row
     conn.execute('PRAGMA journal_mode=WAL')
