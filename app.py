@@ -275,4 +275,72 @@ def api_analyze():
     except Exception as e:
         return jsonify({'ok':False,'error':str(e),'source':source,'before_source':before_source,'odds_source':odds_source}),502
 
+@app.get('/api/daily-predict')
+def api_daily_predict():
+    """Run real-data predictions for the active day's races.
+    Work is deliberately bounded to a small thread pool to avoid Render memory spikes.
+    """
+    date=request.args.get('date',datetime.now().strftime('%Y%m%d')).replace('/','')
+    history_days=max(1,min(int(request.args.get('history_days','3')),7))
+    limit=max(1,min(int(request.args.get('limit','288')),288))
+    try:
+        daily=api_daily().get_json()
+        venues=daily.get('venues',[])
+        targets=[]
+        for v in venues:
+            for race in range(1,13):
+                targets.append((v['venue_code'],v['venue'],race))
+        targets=targets[:limit]
+
+        # Cache one small history sample per active venue instead of refetching it per race.
+        histories={}
+        for jcd,_,_ in targets:
+            if jcd not in histories:
+                histories[jcd]=historical_stats(jcd,history_days)
+
+        def one(item):
+            jcd,venue,race=item
+            source=f'{BASE}racelist?hd={date}&jcd={jcd}&rno={race:02d}'
+            before_source=f'{BASE}beforeinfo?hd={date}&jcd={jcd}&rno={race:02d}'
+            odds_source=f'{BASE}odds3t?hd={date}&jcd={jcd}&rno={race:02d}'
+            try:
+                raw=boats_from(get(source))
+                if len(raw)<6:
+                    return {'ok':False,'venue_code':jcd,'venue':venue,'race':race,'error':'6艇データ未取得','source':source}
+                before=parse_before(get(before_source))
+                boats=analyze(raw,'none',before,histories[jcd])
+                odds=parse_odds(get(odds_source))
+                combos=build_bets(boats,odds,'none')
+                boats.sort(key=lambda x:x['score'],reverse=True)
+                return {
+                    'ok':True,'date':date,'venue_code':jcd,'venue':venue,'race':race,
+                    'race_id':f'{date}-{jcd}-{race:02d}',
+                    'main':boats[0]['boat'],'second':boats[1]['boat'],'hole':boats[2]['boat'],
+                    'scenario':scenario(boats,before),'boats':boats,'bets':combos[:120],
+                    'odds_count':sum(v is not None for v in odds.values()),
+                    'weather':{k:before.get(k) for k in ('wind','wave','air','water')},
+                    'source':source,'before_source':before_source,'odds_source':odds_source
+                }
+            except Exception as e:
+                return {'ok':False,'venue_code':jcd,'venue':venue,'race':race,'error':str(e),'source':source}
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        results=[]
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            futures=[ex.submit(one,t) for t in targets]
+            for fut in as_completed(futures):
+                results.append(fut.result())
+        results.sort(key=lambda x:(x.get('venue_code',''),int(x.get('race',0))))
+        ok=[x for x in results if x.get('ok')]
+        failed=[x for x in results if not x.get('ok')]
+        return jsonify({
+            'ok':True,'date':date,'target_races':len(targets),'generated_races':len(ok),
+            'failed_races':len(failed),'trifecta_combinations':len(ok)*120,
+            'history_days':history_days,'venues_checked':len(venues),
+            'predictions':ok,'errors':failed,
+            'note':'公式出走表・直前情報・3連単オッズを取得して各レースを解析。予想は情報提供用で、購入を自動実行しません。'
+        })
+    except Exception as e:
+        return jsonify({'ok':False,'error':str(e),'date':date}),502
+
 if __name__=='__main__':app.run(host='0.0.0.0',port=8000)
