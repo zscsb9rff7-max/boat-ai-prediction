@@ -356,9 +356,9 @@ USE_POSTGRES=bool(os.getenv('DATABASE_URL','').strip())
 class PGCompat:
     def __init__(self,url):
         import psycopg2
-        from psycopg2.extras import RealDictCursor
+        from psycopg2.extras import DictCursor
         self.conn=psycopg2.connect(url,connect_timeout=10)
-        self.cursor_factory=RealDictCursor
+        self.cursor_factory=DictCursor
     def execute(self,sql,args=()):
         return self.conn.cursor(cursor_factory=self.cursor_factory).execute(sql.replace('?','%s'),args)
     def commit(self): self.conn.commit()
