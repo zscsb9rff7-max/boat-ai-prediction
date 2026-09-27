@@ -343,4 +343,227 @@ def api_daily_predict():
     except Exception as e:
         return jsonify({'ok':False,'error':str(e),'date':date}),502
 
+
+# --- Prediction / result / evaluation store (SQLite interim persistence) ---
+import sqlite3
+import threading
+
+STORE=Path('prediction_store.sqlite3')
+STORE_LOCK=threading.Lock()
+
+def db():
+    conn=sqlite3.connect(str(STORE),timeout=30)
+    conn.row_factory=sqlite3.Row
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('''CREATE TABLE IF NOT EXISTS predictions(
+        race_id TEXT PRIMARY KEY, date TEXT NOT NULL, venue_code TEXT NOT NULL, venue TEXT,
+        race INTEGER NOT NULL, generated_at TEXT NOT NULL, model_version TEXT,
+        main INTEGER, second INTEGER, hole INTEGER, scenario TEXT,
+        boats_json TEXT NOT NULL, bets_json TEXT NOT NULL,
+        weather_json TEXT, source_json TEXT, created_at TEXT NOT NULL)''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS results(
+        race_id TEXT PRIMARY KEY, date TEXT NOT NULL, venue_code TEXT NOT NULL, venue TEXT,
+        race INTEGER NOT NULL, actual_combo TEXT NOT NULL, payout INTEGER,
+        fetched_at TEXT NOT NULL, source TEXT NOT NULL)''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS evaluations(
+        race_id TEXT PRIMARY KEY, predicted_combo TEXT, actual_combo TEXT,
+        exact_hit INTEGER NOT NULL, first_hit INTEGER NOT NULL,
+        actual_probability REAL, logloss REAL, brier REAL,
+        evaluated_at TEXT NOT NULL, learned INTEGER NOT NULL DEFAULT 0)''')
+    conn.commit()
+    return conn
+
+def save_prediction_row(p):
+    rid=str(p.get('race_id') or '')
+    if not rid: raise ValueError('race_id is required')
+    now=datetime.now().isoformat(timespec='seconds')
+    with STORE_LOCK:
+        conn=db()
+        conn.execute('''INSERT INTO predictions
+            (race_id,date,venue_code,venue,race,generated_at,model_version,main,second,hole,scenario,
+             boats_json,bets_json,weather_json,source_json,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(race_id) DO UPDATE SET
+             generated_at=excluded.generated_at, model_version=excluded.model_version,
+             main=excluded.main, second=excluded.second, hole=excluded.hole, scenario=excluded.scenario,
+             boats_json=excluded.boats_json, bets_json=excluded.bets_json,
+             weather_json=excluded.weather_json, source_json=excluded.source_json''',
+            (rid,str(p.get('date','')),str(p.get('venue_code','')),str(p.get('venue','')),
+             int(p.get('race',0)),str(p.get('generated_at') or now),str(p.get('model_version') or 'baseline-v1'),
+             p.get('main'),p.get('second'),p.get('hole'),str(p.get('scenario','')),
+             json.dumps(p.get('boats',[]),ensure_ascii=False),
+             json.dumps(p.get('bets',[]),ensure_ascii=False),
+             json.dumps(p.get('weather',{}),ensure_ascii=False),
+             json.dumps({'source':p.get('source'),'before_source':p.get('before_source'),'odds_source':p.get('odds_source')},ensure_ascii=False),
+             now))
+        conn.commit(); conn.close()
+    return rid
+
+def parse_prediction_bets(row):
+    try:return json.loads(row['bets_json'])
+    except Exception:return []
+
+def evaluate_one(pred,result):
+    bets=parse_prediction_bets(pred)
+    actual=str(result['actual_combo']).replace('-','')
+    top=str(bets[0].get('bet','')).replace('-','') if bets else ''
+    actual_p=0.0
+    probs=[]
+    for b in bets:
+        combo=str(b.get('bet','')).replace('-','')
+        p=float(b.get('probability',0) or 0)
+        probs.append(p)
+        if combo==actual: actual_p=p
+    logloss=-math.log(max(actual_p,1e-9))
+    brier=(actual_p-1.0)**2 + sum(p*p for p in probs if p>=0 and p<=1)
+    predicted_first=top[:1] if top else ''
+    exact=int(bool(top and top==actual))
+    first=int(bool(predicted_first and predicted_first==actual[:1]))
+    return {'predicted_combo':top,'actual_combo':actual,'exact_hit':exact,'first_hit':first,
+            'actual_probability':actual_p,'logloss':logloss,'brier':brier}
+
+@app.post('/api/predictions/save')
+def api_prediction_save():
+    data=request.get_json(force=True)
+    if not isinstance(data,dict): return jsonify({'ok':False,'error':'JSON object required'}),400
+    try:
+        rid=save_prediction_row(data)
+        return jsonify({'ok':True,'race_id':rid,'stored':True})
+    except Exception as e:
+        return jsonify({'ok':False,'error':str(e)}),400
+
+@app.get('/api/predictions')
+def api_predictions():
+    date=request.args.get('date')
+    conn=db()
+    if date:
+        rows=conn.execute('SELECT race_id,date,venue_code,venue,race,generated_at,model_version,main,second,hole,scenario FROM predictions WHERE date=? ORDER BY venue_code,race',(date.replace('/',''),)).fetchall()
+    else:
+        rows=conn.execute('SELECT race_id,date,venue_code,venue,race,generated_at,model_version,main,second,hole,scenario FROM predictions ORDER BY date DESC,venue_code,race LIMIT 500').fetchall()
+    conn.close()
+    return jsonify({'ok':True,'count':len(rows),'predictions':[dict(x) for x in rows]})
+
+@app.get('/api/predictions/stats')
+def api_prediction_stats():
+    conn=db()
+    prediction_count=conn.execute('SELECT COUNT(*) FROM predictions').fetchone()[0]
+    finished=conn.execute('SELECT COUNT(*) FROM results').fetchone()[0]
+    evaluated=conn.execute('SELECT COUNT(*) FROM evaluations').fetchone()[0]
+    exact=conn.execute('SELECT COALESCE(SUM(exact_hit),0) FROM evaluations').fetchone()[0]
+    first=conn.execute('SELECT COALESCE(SUM(first_hit),0) FROM evaluations').fetchone()[0]
+    avg_log=conn.execute('SELECT AVG(logloss) FROM evaluations').fetchone()[0]
+    avg_brier=conn.execute('SELECT AVG(brier) FROM evaluations').fetchone()[0]
+    conn.close()
+    return jsonify({'ok':True,'prediction_count':prediction_count,'finished_races':finished,'evaluated_races':evaluated,
+                    'exact_hits':exact,'first_hits':first,
+                    'exact_hit_rate':round(exact/evaluated*100,2) if evaluated else None,
+                    'first_hit_rate':round(first/evaluated*100,2) if evaluated else None,
+                    'avg_logloss':round(avg_log,6) if avg_log is not None else None,
+                    'avg_brier':round(avg_brier,6) if avg_brier is not None else None,
+                    'storage':'SQLite interim; cloud persistent DB is required for durable production history'})
+
+@app.post('/api/daily-predict-save')
+def api_daily_predict_save():
+    data=api_daily_predict().get_json()
+    if not data.get('ok'): return jsonify(data),502
+    saved=0
+    errors=[]
+    for p in data.get('predictions',[]):
+        try:
+            p['generated_at']=datetime.now().isoformat(timespec='seconds')
+            p['model_version']=str(load_model().get('updated_at') or 'baseline-v1')
+            save_prediction_row(p); saved+=1
+        except Exception as e:
+            errors.append({'race_id':p.get('race_id'),'error':str(e)})
+    data['saved_predictions']=saved
+    data['save_errors']=errors
+    return jsonify(data)
+
+@app.post('/api/results/fetch')
+def api_results_fetch():
+    date=request.args.get('date',datetime.now().strftime('%Y%m%d')).replace('/','')
+    venue_code=request.args.get('venue_code') or request.args.get('stadium')
+    try:
+        targets=[]
+        if venue_code:
+            if venue_code not in STADIUMS: raise ValueError('venue_code must be 01-24')
+            targets=[(venue_code,STADIUMS[venue_code])]
+        else:
+            daily=api_daily().get_json()
+            targets=[(v['venue_code'],v['venue']) for v in daily.get('venues',[])]
+        saved=[]; errors=[]
+        for jcd,venue in targets:
+            url=f'{BASE}resultlist?hd={date}&jcd={jcd}'
+            try:
+                rows=parse_resultlist(get(url))
+                for r in rows:
+                    rid=f'{date}-{jcd}-{int(r["race"]):02d}'
+                    with STORE_LOCK:
+                        conn=db()
+                        conn.execute('''INSERT INTO results(race_id,date,venue_code,venue,race,actual_combo,payout,fetched_at,source)
+                            VALUES(?,?,?,?,?,?,?,?,?)
+                            ON CONFLICT(race_id) DO UPDATE SET actual_combo=excluded.actual_combo,payout=excluded.payout,
+                            fetched_at=excluded.fetched_at,source=excluded.source''',
+                            (rid,date,jcd,venue,int(r['race']),str(r['combo']),r.get('payout'),
+                             datetime.now().isoformat(timespec='seconds'),url))
+                        conn.commit(); conn.close()
+                    saved.append(rid)
+            except Exception as e:
+                errors.append({'venue_code':jcd,'venue':venue,'error':str(e)})
+        return jsonify({'ok':True,'date':date,'venues_checked':len(targets),'results_saved':len(saved),
+                        'race_ids':saved,'errors':errors,'note':'公式競走成績から確定した3連単結果だけを保存します。'})
+    except Exception as e:
+        return jsonify({'ok':False,'error':str(e)}),400
+
+@app.post('/api/evaluate/day')
+def api_evaluate_day():
+    date=request.args.get('date',datetime.now().strftime('%Y%m%d')).replace('/','')
+    learn=request.args.get('learn','1') in ('1','true','yes')
+    conn=db()
+    rows=conn.execute('''SELECT p.*,r.actual_combo,r.payout FROM predictions p
+                         JOIN results r ON p.race_id=r.race_id
+                         WHERE p.date=? ORDER BY p.venue_code,p.race''',(date,)).fetchall()
+    evaluated=0; exact=0; first=0; logs=[]; state=load_model()
+    for row in rows:
+        ev=evaluate_one(row,row)
+        learned=0
+        if learn:
+            try:
+                predicted_order=[int(x) for x in re.findall(r'\d',ev['predicted_combo'])][:3]
+                if predicted_order:
+                    state,hit=learn_from_record(state,predicted_order,int(ev['actual_combo'][0]))
+                    learned=1
+            except Exception:
+                pass
+        conn.execute('''INSERT INTO evaluations
+            (race_id,predicted_combo,actual_combo,exact_hit,first_hit,actual_probability,logloss,brier,evaluated_at,learned)
+            VALUES(?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(race_id) DO UPDATE SET predicted_combo=excluded.predicted_combo,
+            actual_combo=excluded.actual_combo,exact_hit=excluded.exact_hit,first_hit=excluded.first_hit,
+            actual_probability=excluded.actual_probability,logloss=excluded.logloss,brier=excluded.brier,
+            evaluated_at=excluded.evaluated_at,learned=excluded.learned''',
+            (row['race_id'],ev['predicted_combo'],ev['actual_combo'],ev['exact_hit'],ev['first_hit'],
+             ev['actual_probability'],ev['logloss'],ev['brier'],datetime.now().isoformat(timespec='seconds'),learned))
+        conn.commit()
+        evaluated+=1; exact+=ev['exact_hit']; first+=ev['first_hit']; logs.append({'race_id':row['race_id'],**ev,'learned':learned})
+    conn.close()
+    return jsonify({'ok':True,'date':date,'evaluated_races':evaluated,'exact_hits':exact,'first_hits':first,
+                    'exact_hit_rate':round(exact/evaluated*100,2) if evaluated else None,
+                    'first_hit_rate':round(first/evaluated*100,2) if evaluated else None,
+                    'learned_records':sum(x['learned'] for x in logs),
+                    'model':load_model(),'evaluations':logs,
+                    'note':'評価指標はモデル検証用です。的中率や払戻を将来の成果として保証するものではありません。'})
+
+@app.post('/api/daily-close')
+def api_daily_close():
+    date=request.args.get('date',datetime.now().strftime('%Y%m%d')).replace('/','')
+    r=api_results_fetch().get_json()
+    e=api_evaluate_day().get_json()
+    return jsonify({'ok':bool(r.get('ok') and e.get('ok')),'date':date,
+                    'results_saved':r.get('results_saved',0),'evaluated_races':e.get('evaluated_races',0),
+                    'exact_hit_rate':e.get('exact_hit_rate'),'first_hit_rate':e.get('first_hit_rate'),
+                    'learned_records':e.get('learned_records',0),'result_errors':r.get('errors',[]),
+                    'note':'日次クローズ：結果取得→予想照合→評価→オンライン学習の順で処理しました。'})
+
+
 if __name__=='__main__':app.run(host='0.0.0.0',port=8000)
