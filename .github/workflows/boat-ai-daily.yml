@@ -1,0 +1,17 @@
+name: Boat AI Daily Loop
+on:
+  schedule:
+    - cron: '0 15 * * *'
+  workflow_dispatch:
+jobs:
+  daily-run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run daily prediction evaluation and learning
+        env:
+          BOAT_AI_API: https://boat-ai-api-v3.onrender.com
+        run: |
+          DATE=$(TZ=Asia/Tokyo date +%Y%m%d)
+          echo "Running Boat AI daily loop for $DATE"
+          curl --fail-with-body --show-error --silent             --max-time 900             -X POST "$BOAT_AI_API/api/daily-run?date=$DATE&limit=288&history_days=3&learn=1"
+          echo
