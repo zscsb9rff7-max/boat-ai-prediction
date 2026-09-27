@@ -554,6 +554,80 @@ def api_evaluate_day():
                     'model':load_model(),'evaluations':logs,
                     'note':'評価指標はモデル検証用です。的中率や払戻を将来の成果として保証するものではありません。'})
 
+
+@app.get('/api/analytics')
+def api_analytics():
+    """Break evaluation quality down by venue, predicted first boat, scenario and odds band."""
+    date=request.args.get('date')
+    conn=db()
+    q='''SELECT p.*,r.actual_combo,e.predicted_combo,e.exact_hit,e.first_hit,
+                e.actual_probability,e.logloss,e.brier
+         FROM predictions p
+         JOIN results r ON p.race_id=r.race_id
+         JOIN evaluations e ON p.race_id=e.race_id'''
+    args=[]
+    if date:
+        q+=' WHERE p.date=?'
+        args.append(date.replace('/',''))
+    q+=' ORDER BY p.date,p.venue_code,p.race'
+    rows=conn.execute(q,args).fetchall()
+    conn.close()
+
+    def avg(a):
+        return round(sum(a)/len(a),6) if a else None
+    def group(items,key):
+        out={}
+        for x in items:
+            k=str(key(x))
+            z=out.setdefault(k,{'races':0,'exact_hits':0,'first_hits':0,'logloss':[],'brier':[]})
+            z['races']+=1; z['exact_hits']+=int(x['exact_hit']); z['first_hits']+=int(x['first_hit'])
+            z['logloss'].append(float(x['logloss'] or 0)); z['brier'].append(float(x['brier'] or 0))
+        for z in out.values():
+            n=z['races']; z['exact_hit_rate']=round(z['exact_hits']/n*100,2) if n else None
+            z['first_hit_rate']=round(z['first_hits']/n*100,2) if n else None
+            z['avg_logloss']=avg(z.pop('logloss')); z['avg_brier']=avg(z.pop('brier'))
+        return out
+
+    items=[]
+    for r in rows:
+        try: bets=json.loads(r['bets_json'])
+        except Exception: bets=[]
+        top=bets[0] if bets else {}
+        bet=str(top.get('bet','')).replace('-','')
+        odds=top.get('odds')
+        try: odds=float(odds) if odds is not None else None
+        except Exception: odds=None
+        main=str(r['main'] or (bet[:1] if bet else '—'))
+        prob=float(top.get('probability',0) or 0)
+        if odds is None: band='オッズ未取得'
+        elif odds<10: band='〜9.9'
+        elif odds<20: band='10〜19.9'
+        elif odds<50: band='20〜49.9'
+        elif odds<100: band='50〜99.9'
+        else: band='100〜'
+        items.append({'venue':r['venue'] or r['venue_code'],'main':main,
+                      'scenario':r['scenario'] or '不明','odds_band':band,
+                      'odds':odds,'probability':prob,'exact_hit':int(r['exact_hit']),
+                      'first_hit':int(r['first_hit']),'logloss':float(r['logloss'] or 0),
+                      'brier':float(r['brier'] or 0)})
+
+    def rows_for(d):
+        return [{'group':k,**v} for k,v in sorted(d.items(),key=lambda kv:kv[0])]
+
+    overall={'races':len(items),'exact_hits':sum(x['exact_hit'] for x in items),
+             'first_hits':sum(x['first_hit'] for x in items),
+             'exact_hit_rate':round(sum(x['exact_hit'] for x in items)/len(items)*100,2) if items else None,
+             'first_hit_rate':round(sum(x['first_hit'] for x in items)/len(items)*100,2) if items else None,
+             'avg_logloss':avg([x['logloss'] for x in items]),
+             'avg_brier':avg([x['brier'] for x in items])}
+    return jsonify({'ok':True,'date':date,'overall':overall,
+                    'by_venue':rows_for(group(items,lambda x:x['venue'])),
+                    'by_main_boat':rows_for(group(items,lambda x:x['main'])),
+                    'by_scenario':rows_for(group(items,lambda x:x['scenario'])),
+                    'by_odds_band':rows_for(group(items,lambda x:x['odds_band'])),
+                    'note':'保存済み予測と確定結果の評価データから条件別に集計しています。件数が少ない区分は参考値として扱ってください。'})
+
+
 @app.post('/api/daily-close')
 def api_daily_close():
     date=request.args.get('date',datetime.now().strftime('%Y%m%d')).replace('/','')
