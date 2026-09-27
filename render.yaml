@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: boat-ai-api-v3
+    runtime: python
+    plan: free
+    region: oregon
+    repo: https://github.com/zscsb9rff7-max/boat-ai-prediction
+    branch: daily-24-venue-ingest
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 1 --threads 2 --timeout 180
+    autoDeploy: true
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: boat-ai-db
+          property: connectionString
+
+databases:
+  - name: boat-ai-db
+    plan: free
