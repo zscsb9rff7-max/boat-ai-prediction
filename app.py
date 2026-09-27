@@ -347,11 +347,26 @@ def api_daily_predict():
 # --- Prediction / result / evaluation store (SQLite interim persistence) ---
 import sqlite3
 import threading
+import os
 
 STORE=Path('prediction_store.sqlite3')
 STORE_LOCK=threading.Lock()
+USE_POSTGRES=bool(os.getenv('DATABASE_URL','').strip())
+
+class PGCompat:
+    def __init__(self,url):
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+        self.conn=psycopg2.connect(url,connect_timeout=10)
+        self.cursor_factory=RealDictCursor
+    def execute(self,sql,args=()):
+        return self.conn.cursor(cursor_factory=self.cursor_factory).execute(sql.replace('?','%s'),args)
+    def commit(self): self.conn.commit()
+    def close(self): self.conn.close()
 
 def db():
+    if USE_POSTGRES:
+        return PGCompat(os.environ['DATABASE_URL'])
     conn=sqlite3.connect(str(STORE),timeout=30)
     conn.row_factory=sqlite3.Row
     conn.execute('PRAGMA journal_mode=WAL')
@@ -372,6 +387,28 @@ def db():
         evaluated_at TEXT NOT NULL, learned INTEGER NOT NULL DEFAULT 0)''')
     conn.commit()
     return conn
+
+def init_db():
+    if not USE_POSTGRES: db().close(); return
+    conn=db()
+    conn.execute('''CREATE TABLE IF NOT EXISTS predictions(
+        race_id TEXT PRIMARY KEY, date TEXT NOT NULL, venue_code TEXT NOT NULL, venue TEXT,
+        race INTEGER NOT NULL, generated_at TEXT NOT NULL, model_version TEXT,
+        main INTEGER, second INTEGER, hole INTEGER, scenario TEXT,
+        boats_json TEXT NOT NULL, bets_json TEXT NOT NULL,
+        weather_json TEXT, source_json TEXT, created_at TEXT NOT NULL)''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS results(
+        race_id TEXT PRIMARY KEY, date TEXT NOT NULL, venue_code TEXT NOT NULL, venue TEXT,
+        race INTEGER NOT NULL, actual_combo TEXT NOT NULL, payout INTEGER,
+        fetched_at TEXT NOT NULL, source TEXT NOT NULL)''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS evaluations(
+        race_id TEXT PRIMARY KEY, predicted_combo TEXT, actual_combo TEXT,
+        exact_hit INTEGER NOT NULL, first_hit INTEGER NOT NULL,
+        actual_probability REAL, logloss REAL, brier REAL,
+        evaluated_at TEXT NOT NULL, learned INTEGER NOT NULL DEFAULT 0)''')
+    conn.commit(); conn.close()
+
+init_db()
 
 def save_prediction_row(p):
     rid=str(p.get('race_id') or '')
