@@ -31,14 +31,16 @@ table{width:100%;border-collapse:collapse}th,td{padding:10px 8px;border-bottom:1
 </head>
 <body>
 <div class="app">
-<header><div class="brand">BOAT <span>AI</span> 予想</div><div class="badge">VER.6 PROTOTYPE</div></header>
+<header><div class="brand">BOAT <span>AI</span> 予想</div><div class="badge">VER.7 24場対応</div></header>
 <section class="hero">
 <h1>レースを選んで、AI分析</h1>
-<div class="sub">出走データ・ST・機力・展示・オッズをまとめて、展開と買い目候補を整理。</div>
+<div class="sub">全国24場・全12Rに対応。出走データ・ST・機力・展示・オッズをまとめて、展開と買い目候補を整理。</div>
 <div class="controls">
 <select id="date"><option>2026/09/27</option><option>2026/09/28</option></select>
-<select id="stadium"><option>丸亀</option><option>児島</option><option>蒲郡</option><option>住之江</option><option>大村</option></select>
-<select id="race"><option>9R</option><option>10R</option><option>11R</option><option>12R</option></select>
+<select id="stadium">
+<option value="01">桐生</option><option value="02">戸田</option><option value="03">江戸川</option><option value="04">平和島</option><option value="05">多摩川</option><option value="06">浜名湖</option><option value="07">蒲郡</option><option value="08">常滑</option><option value="09">津</option><option value="10">三国</option><option value="11">びわこ</option><option value="12">住之江</option><option value="13">尼崎</option><option value="14">鳴門</option><option value="15">丸亀</option><option value="16">児島</option><option value="17">宮島</option><option value="18">徳山</option><option value="19">下関</option><option value="20">若松</option><option value="21">芦屋</option><option value="22">福岡</option><option value="23">唐津</option><option value="24">大村</option>
+</select>
+<select id="race"><option value="1">1R</option><option value="2">2R</option><option value="3">3R</option><option value="4">4R</option><option value="5">5R</option><option value="6">6R</option><option value="7">7R</option><option value="8">8R</option><option value="9">9R</option><option value="10">10R</option><option value="11">11R</option><option value="12">12R</option></select>
 <select id="fixed"><option value="none">1着固定なし</option><option value="1">1号艇を1着固定</option><option value="2">2号艇を1着固定</option><option value="3">3号艇を1着固定</option><option value="4">4号艇を1着固定</option><option value="5">5号艇を1着固定</option><option value="6">6号艇を1着固定</option></select>
 <button onclick="analyze()">分析開始</button>
 </div>
@@ -71,9 +73,9 @@ table{width:100%;border-collapse:collapse}th,td{padding:10px 8px;border-bottom:1
 <script>
 async function analyze(){
  const date=document.getElementById('date').value.replaceAll('/','');
- const stadiumMap={'丸亀':'15','児島':'16','蒲郡':'07','住之江':'12','大村':'24'};
+ const stadium= document.getElementById('stadium').value;
  const stadium=stadiumMap[document.getElementById('stadium').value]||'15';
- const race=document.getElementById('race').value.replace('R','');
+ const race=document.getElementById('race').value;
  const fixed=document.getElementById('fixed').value;
  const status=document.getElementById('reason'); status.textContent='公式データを取得して分析中…';
  try{
