@@ -36,6 +36,10 @@ jobs:
         env:
           BATCH_DAYS: '1000'
           PUBLISH_PROGRESS: '1'
+      - name: Backfill verified official grades for saved race data
+        run: node boat-balance-grades.cjs
+        env:
+          GRADE_MINUTES: '3'
       - name: Save remaining progress
         if: always()
         working-directory: archive
