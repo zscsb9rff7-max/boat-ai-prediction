@@ -59,7 +59,8 @@ jobs:
             const fs = require('fs');
             if (!fs.existsSync('backfill-continuation.json')) return;
             const state = JSON.parse(fs.readFileSync('backfill-continuation.json', 'utf8'));
-            if (!state.continueBackfill) return;
+            const grades = fs.existsSync('grade-continuation.json') ? JSON.parse(fs.readFileSync('grade-continuation.json', 'utf8')) : {};
+            if (!state.continueBackfill && !grades.continueGradeBackfill) return;
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo: context.repo.repo,
