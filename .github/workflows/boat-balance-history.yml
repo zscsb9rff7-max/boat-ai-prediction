@@ -1,13 +1,15 @@
 name: BOAT BALANCE official history
 on:
   schedule:
-    - cron: '17 * * * *'
+    # JST 00:17, 02:17 and 06:17: daily result, then publication retries.
+    - cron: '17 15,17,21 * * *'
   workflow_dispatch:
   push:
     branches: [main]
     paths: ['.github/workflows/boat-balance-history.yml']
 permissions:
   contents: write
+  actions: write
 concurrency:
   group: boat-balance-history
   cancel-in-progress: false
@@ -17,24 +19,47 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: boat-balance-history
+          path: archive
           fetch-depth: 1
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Collect recent results and a historical batch
-        run: node collector/collect.cjs
-        env:
-          HISTORY_START: '1996-01-01'
-          BATCH_DAYS: '200'
-      - name: Save archive and progress
-        if: always()
+      - name: Configure archive identity
         run: |
-          git config user.name 'BOAT BALANCE collector'
-          git config user.email 'boat-balance-collector@users.noreply.github.com'
-          git add history
-          if ! git diff --cached --quiet; then
-            git commit -m 'Update official race history and collection progress'
-            git push origin HEAD:boat-balance-history
+          git -C archive config user.name 'BOAT BALANCE collector'
+          git -C archive config user.email 'boat-balance-collector@users.noreply.github.com'
+      - name: Collect daily results and parallel ten-year backfill
+        run: node boat-balance-collector.cjs
+        env:
+          BATCH_DAYS: '1000'
+          PUBLISH_PROGRESS: '1'
+      - name: Save remaining progress
+        if: always()
+        working-directory: archive
+        run: |
+          if [ -d history ]; then
+            git add history
+            if ! git diff --cached --quiet; then
+              git commit -m 'Save official history progress'
+              git pull --rebase origin boat-balance-history
+              git push origin HEAD:boat-balance-history
+            fi
           fi
+      - name: Start next historical batch without waiting for the schedule
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            if (!fs.existsSync('backfill-continuation.json')) return;
+            const state = JSON.parse(fs.readFileSync('backfill-continuation.json', 'utf8'));
+            if (!state.continueBackfill) return;
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'boat-balance-history.yml',
+              ref: 'main'
+            });
+            core.info('Queued the next ten-year historical batch.');
