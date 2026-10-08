@@ -1,0 +1,40 @@
+name: BOAT BALANCE race category index
+on:
+  push:
+    branches: [main]
+    paths: ['boat-balance-race-kinds.cjs', '.github/workflows/boat-balance-race-kinds.yml']
+  workflow_dispatch:
+  schedule:
+    - cron: '47 15,17,21 * * *'
+permissions:
+  contents: write
+concurrency:
+  group: boat-balance-race-kinds
+  cancel-in-progress: false
+jobs:
+  index:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: boat-balance-history
+          path: archive
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Index official race names from saved archives
+        run: node boat-balance-race-kinds.cjs
+      - name: Save race labels
+        working-directory: archive
+        run: |
+          git config user.name 'BOAT BALANCE collector'
+          git config user.email 'boat-balance-collector@users.noreply.github.com'
+          git add history/race-kinds
+          if ! git diff --cached --quiet; then
+            git commit -m 'Index official race names for final-race filtering'
+            git pull --rebase origin boat-balance-history
+            git push origin HEAD:boat-balance-history
+          fi
