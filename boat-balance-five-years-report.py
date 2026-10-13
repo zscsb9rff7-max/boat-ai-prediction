@@ -2,6 +2,7 @@ import json,gzip,base64,glob,collections,datetime
 from pathlib import Path
 root=Path('archive/history')
 venues='桐生 戸田 江戸川 平和島 多摩川 浜名湖 蒲郡 常滑 津 三国 びわこ 住之江 尼崎 鳴門 丸亀 児島 宮島 徳山 下関 若松 芦屋 福岡 唐津 大村'.split()
+all_races={}
 data={v:{} for v in venues}; unknown=collections.Counter(); labels=collections.Counter(); excluded=collections.Counter()
 def read(path):return json.loads(gzip.decompress(path.read_bytes()))
 p=json.loads((root/'progress.json').read_text())
@@ -16,6 +17,7 @@ for f in sorted((root/'records').glob('*.json.gz')):
         for r in day['rows']:
             if r['type']!='3連単':continue
             v=r['venue']; key=(d,str(r['race']))
+            all_races.setdefault((d,v,str(r['race'])),set()).add(r['result'])
             name=kinds.get(d,{}).get(v,{}).get(str(r['race']))
             if not name:
                 unknown[v]+=1;continue
@@ -37,6 +39,10 @@ for v,races in data.items():
     roi=sorted(rows,key=lambda r:(-r['recoveryRate'],-r['count'],r['result']))[:10]
     dates=sorted(k[0] for k in races)
     out['venues'].append(dict(name=v,totalRaces=n,first=dates[0] if dates else None,last=dates[-1] if dates else None,officialFinalLabels=labels[v],unusableFinals=labels[v]-n,unknownRaceNames=unknown[v],frequency=freq,recovery=roi))
+import itertools
+counts=collections.Counter(result for winners in all_races.values() for result in winners)
+all_rankings=[dict(result='-'.join(map(str,combo)),count=counts['-'.join(map(str,combo))],probability=counts['-'.join(map(str,combo))]/len(all_races)*100) for combo in itertools.permutations(range(1,7),3)]
+out['allRaces']={'totalRaces':len(all_races),'worst':sorted(all_rankings,key=lambda x:(x['count'],x['result']))[:10]}
 assert len(out['venues'])==24
 (root/'reports').mkdir(exist_ok=True)
 (root/'reports'/'finals-24-five-years.json').write_text(json.dumps(out,ensure_ascii=False,indent=2))
