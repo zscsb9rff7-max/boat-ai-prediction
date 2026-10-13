@@ -3679,5 +3679,60 @@
         }
       ]
     }
-  ]
+  ],
+  "allRaces": {
+    "totalRaces": 263839,
+    "worst": [
+      {
+        "result": "6-5-4",
+        "count": 185,
+        "probability": 0.07011851924848109
+      },
+      {
+        "result": "6-5-3",
+        "count": 188,
+        "probability": 0.07125557631737538
+      },
+      {
+        "result": "6-3-5",
+        "count": 219,
+        "probability": 0.08300516602928301
+      },
+      {
+        "result": "6-5-2",
+        "count": 224,
+        "probability": 0.08490026114410681
+      },
+      {
+        "result": "6-4-3",
+        "count": 254,
+        "probability": 0.0962708318330497
+      },
+      {
+        "result": "6-4-5",
+        "count": 275,
+        "probability": 0.10423023131530972
+      },
+      {
+        "result": "6-2-5",
+        "count": 287,
+        "probability": 0.10877845959088688
+      },
+      {
+        "result": "6-3-4",
+        "count": 296,
+        "probability": 0.11218963079756973
+      },
+      {
+        "result": "6-5-1",
+        "count": 304,
+        "probability": 0.11522178298128782
+      },
+      {
+        "result": "6-3-2",
+        "count": 327,
+        "probability": 0.12393922050947738
+      }
+    ]
+  }
 }
