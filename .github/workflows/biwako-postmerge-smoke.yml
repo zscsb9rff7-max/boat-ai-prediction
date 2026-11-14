@@ -1,0 +1,44 @@
+name: Biwako post-merge HTTP verification
+on:
+  push:
+    branches: ['diagnostics/biwako-api-postmerge-20261115']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Read only public API verification
+        run: |
+          python3 - <<'PY'
+          import urllib.request, urllib.error, time, json
+          base='https://boat-ai-prediction.onrender.com'
+          tasks=[('/health','health'),
+                 ('/api/biwako_tactics?date=20261114&stadium=11&race=1','20261114 1R'),
+                 ('/api/biwako_tactics?date=20261115&stadium=11&race=6','20261115 6R'),
+                 ('/api/biwako_tactics?date=20261115&stadium=11&race=12','20261115 12R')]
+          success=0
+          for path,label in tasks:
+              started=time.monotonic()
+              try:
+                  req=urllib.request.Request(base+path,headers={'User-Agent':'BOAT-AI-ReadOnly-Verification/1.0','Accept-Encoding':'identity'})
+                  with urllib.request.urlopen(req,timeout=31) as response:
+                      data=response.read(4096).decode('utf-8','replace')
+                      body=json.loads(data)
+                      boats=body.get('boats')
+                      result={'label':label,'status':response.status,'elapsed_s':round(time.monotonic()-started,2),
+                          'code':body.get('code'),'ok':body.get('ok'),'ready_days':body.get('ready_days'),
+                          'baseline_days':body.get('baseline_days'),'boats':len(boats) if isinstance(boats,list) else None,
+                          'racer_ids':[b.get('racer_id') for b in boats] if isinstance(boats,list) else None,
+                          'sample_first':[b.get('rates',{}).get('first') for b in boats[:2]] if isinstance(boats,list) else None}
+                      if label=='health':result['storage']=body.get('storage',{}).get('phase')
+                      print(json.dumps(result,ensure_ascii=False),flush=True)
+                      if response.status==200 and body.get('ok') and (label=='health' or len(boats or [])==6): success+=1
+              except urllib.error.HTTPError as ex:
+                  body=ex.read(1024).decode('utf-8','replace')
+                  print(json.dumps({'label':label,'status':ex.code,'elapsed_s':round(time.monotonic()-started,2),'error':body[:700]},ensure_ascii=False),flush=True)
+              except Exception as ex:
+                  print(json.dumps({'label':label,'exception':type(ex).__name__,'elapsed_s':round(time.monotonic()-started,2),'message':str(ex)[:240]},ensure_ascii=False),flush=True)
+          print(f'VERIFIED {success}/4',flush=True)
+          PY
