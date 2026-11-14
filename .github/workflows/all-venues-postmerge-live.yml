@@ -1,0 +1,60 @@
+name: All venues post-merge live verification
+on:
+  push:
+    branches: ['diagnostics/all-venues-live-20261115']
+permissions:
+  contents: read
+jobs:
+  read-only-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Probe active non-Biwako venue races without mutations
+        run: |
+          python3 - <<'PY'
+          import json,time,urllib.request,urllib.error
+          base='https://boat-ai-prediction.onrender.com'
+          def call(path, timeout=32):
+              started=time.monotonic()
+              try:
+                  with urllib.request.urlopen(urllib.request.Request(base+path,headers={
+                      'User-Agent':'BoatAI-ReadOnly-24Venue-Check/1.0',
+                      'Accept-Encoding':'identity'}), timeout=timeout) as res:
+                      body=json.load(res)
+                      return {'http':res.status,'seconds':round(time.monotonic()-started,2)},body
+              except urllib.error.HTTPError as ex:
+                  return {'http':ex.code,'seconds':round(time.monotonic()-started,2)}, {'error':ex.read(1200).decode('utf8','replace')}
+              except Exception as ex:
+                  return {'exception':type(ex).__name__,'seconds':round(time.monotonic()-started,2),'message':str(ex)},{}
+          h, health=call('/health',12)
+          print('HEALTH',json.dumps({'status':h,'ok':health.get('ok'),'storage':health.get('storage',{}).get('phase')},ensure_ascii=False),flush=True)
+          result,schedule=call('/api/schedule?date=20261115',25)
+          venues=schedule.get('venues') or []
+          print('SCHEDULE',json.dumps({'status':result,'ok':schedule.get('ok'),'venues':venues[:24]},ensure_ascii=False),flush=True)
+          parsed=[]
+          for x in venues:
+              if isinstance(x,dict):
+                  stadium=str(x.get('stadium') or x.get('jcd') or '').zfill(2)
+              else:
+                  stadium=str(x).zfill(2)
+              if stadium and stadium!='11' and len(stadium)==2 and stadium.isdigit():
+                  parsed.append(stadium)
+          selected=list(dict.fromkeys(parsed))[:2]
+          print('SELECTED',selected,flush=True)
+          for venue in selected:
+              detail,data=call(f'/api/tactics?date=20261115&stadium={venue}&race=1')
+              boats=data.get('boats',[])
+              raw_1=boats[0] if len(boats)==6 else {}
+              print('TACTICS',json.dumps({
+                  'venue':venue,'http':detail.get('http'),'seconds':detail.get('seconds'),
+                  'exception':detail.get('exception'),'error':data.get('error'),
+                  'code':data.get('code'),'ok':data.get('ok'),
+                  'boats':len(boats),'racer_sample':raw_1.get('starts'),
+                  'venue_sample':raw_1.get('venue_starts'),
+                  'escape_rate':raw_1.get('escape'),'first_baseline':raw_1.get('rates',{}).get('first',{}).get('base'),
+                  'first_estimated':raw_1.get('rates',{}).get('first',{}).get('estimated'),
+                  'venue_days':data.get('venue_days'),'ready_days':data.get('ready_days'),
+                  'venue_pending':data.get('venue_pending')
+              },ensure_ascii=False),flush=True)
+          print('COMPLETED',len(selected),'out-of-Biwako race checks',flush=True)
+          PY
