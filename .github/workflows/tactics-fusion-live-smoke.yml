@@ -1,0 +1,59 @@
+name: Verify live tactical fusion read-only
+on:
+  push:
+    branches: ['diagnostics/tactics-fusion-live-20261116']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Probe deployed 24-venue forecast and ticket rules
+        run: |
+          python3 - <<'PY'
+          import json, time, urllib.request, urllib.error
+          BASE="https://boat-ai-prediction.onrender.com"
+          def read(url,timeout=64):
+              start=time.monotonic()
+              try:
+                  req=urllib.request.Request(BASE+url,headers={
+                      'User-Agent':'BOAT-AI-Public-Read-Only-Verification/1.0',
+                      'Accept-Encoding':'identity'})
+                  with urllib.request.urlopen(req,timeout=timeout) as res:
+                      body=json.load(res)
+                      return res.status,round(time.monotonic()-start,2),body
+              except urllib.error.HTTPError as error:
+                  return error.code,round(time.monotonic()-start,2),{'error':error.read(500).decode('utf-8','replace')}
+              except Exception as error:
+                  return -1,round(time.monotonic()-start,2),{'error':f'{type(error).__name__}: {error}'}
+          code,secs,health=read('/health',12)
+          print('HEALTH',json.dumps({'http':code,'seconds':secs,'ok':health.get('ok')},ensure_ascii=False),flush=True)
+          code,secs,schedule=read('/api/schedule?date=20261116',28)
+          venues=[str(x.get('stadium') or '').zfill(2) for x in schedule.get('venues',[]) if isinstance(x,dict)]
+          print('SCHEDULE',json.dumps({'http':code,'seconds':secs,'venues':venues},ensure_ascii=False),flush=True)
+          valid=[x for x in ['11','15','02','03','08','24','20','22','09','13']+venues if x in venues]
+          selected=list(dict.fromkeys(valid))[:3]
+          completed=0
+          for stadium in selected:
+              code,seconds,response=read('/api/analyze?date=20261116&stadium='+stadium+'&race=12&fixed=none',70)
+              tactics=response.get('tactics_integration',{})
+              tickets=response.get('bets',[])
+              categories={key:[x.get('bet') for x in tickets if x.get('category')==key] for key in ['gachi','oni','roman']}
+              compared=response.get('tactics_comparison',{})
+              overlap=set(categories['roman']) & set(categories['gachi'])
+              oni_valid=set(categories['oni']).issubset(set(categories['gachi']))
+              stat={'stadium':stadium,'http':code,'seconds':seconds,'ok':response.get('ok'),
+                  'error':response.get('error'),'schema':response.get('feature_schema'),
+                  'tactics':tactics,'has_comparison':bool(compared),
+                  'baseline_ticket_counts':{key:len(value) for key,value in compared.get('baseline_bets',{}).items()},
+                  'boats':len(response.get('boats',[])),'categories':{k:len(v) for k,v in categories.items()},
+                  'oni_subset_gachi':oni_valid,'roman_gachi_overlap':len(overlap)}
+              print('FORECAST',json.dumps(stat,ensure_ascii=False),flush=True)
+              if code==200 and response.get('ok') and len(response.get('boats',[]))==6:
+                  completed+=1
+                  if tactics.get('applied') and compared and oni_valid and not overlap:
+                      print('TACITCS_INTEGRATED_ACTUAL_SUCCESS',stadium,flush=True)
+                      break
+          print('FORECASTS_COMPLETED',completed,'/',len(selected),flush=True)
+          PY
