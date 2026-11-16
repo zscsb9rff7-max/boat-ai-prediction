@@ -32,7 +32,7 @@ jobs:
           code,secs,schedule=read('/api/schedule?date=20261116',28)
           venues=[str(x.get('stadium') or '').zfill(2) for x in schedule.get('venues',[]) if isinstance(x,dict)]
           print('SCHEDULE',json.dumps({'http':code,'seconds':secs,'venues':venues},ensure_ascii=False),flush=True)
-          valid=[x for x in ['11','15','02','03','08','24','20','22','09','13']+venues if x in venues]
+          valid=[x for x in ['15','03','11','08','24','20','22','09','13']+venues if x in venues]
           selected=list(dict.fromkeys(valid))[:3]
           completed=0
           for stadium in selected:
